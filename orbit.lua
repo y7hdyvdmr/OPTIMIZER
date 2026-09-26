@@ -1,9 +1,10 @@
 --[[
     ╔══════════════════════════════════════════════════════════╗
-    ║   OPTIMIZER v3.1                                         ║
-    ║   + Счётчик FPS: было / стало / сейчас                   ║
-    ║   + НЕ трогает CoreGui (иконки Delta и Roblox)           ║
-    ║   + Скрывает только игровой UI                           ║
+    ║   OPTIMIZER v3.2                                         ║
+    ║   + FPS счётчик: было / стало / сейчас                   ║
+    ║   + НЕ скрывает НИКАКОЙ UI                               ║
+    ║     (ни игра, ни Delta, ни Roblox)                       ║
+    ║   + Убирает только частицы, свет, тени, эффекты          ║
     ║   Работает в Delta / Arceus X / Fluxus                   ║
     ╚══════════════════════════════════════════════════════════╝
 --]]
@@ -13,30 +14,30 @@ local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local Workspace = game:GetService("Workspace")
 local Terrain = Workspace:FindFirstChildOfClass("Terrain")
-local StarterGui = game:GetService("StarterGui")
 local LocalPlayer = Players.LocalPlayer
 
 -- ==================== НАСТРОЙКИ ====================
 local SETTINGS = {
-    RemoveTextures = true,
-    RemoveMeshes = false,
-    RemoveParticles = true,
-    RemoveLights = true,
-    RemoveShadows = true,
-    RemoveDecals = true,
-    RemoveFog = true,
-    RemoveSky = true,
-    RemoveAtmosphere = true,
-    RemoveBloom = true,
-    RemoveBlur = true,
-    RemoveSunRays = true,
-    RemoveColorCorrection = true,
-    RemoveDepthOfField = true,
-    TerrainLowQuality = true,
-    KillSounds = false,
-    HideGameUI = true,          -- скрывает ТОЛЬКО игровой UI (не Delta!)
-    HideChat = true,            -- скрывает чат
-    HideTopbar = true,          -- скрывает топбар Roblox в игре
+    RemoveTextures = true,       -- убрать Texture
+    RemoveMeshes = false,        -- убрать меши (может сломать карту)
+    RemoveParticles = true,      -- убрать частицы, дым, огонь, луч
+    RemoveLights = true,         -- убрать PointLight/SpotLight/SurfaceLight
+    RemoveShadows = true,        -- отключить тени
+    RemoveDecals = true,         -- убрать наклейки
+    RemoveFog = true,            -- убрать туман
+    RemoveSky = true,            -- убрать небо
+    RemoveAtmosphere = true,     -- убрать атмосферу
+    RemoveBloom = true,          -- убрать Bloom
+    RemoveBlur = true,           -- убрать Blur
+    RemoveSunRays = true,        -- убрать SunRays
+    RemoveColorCorrection = true,-- убрать ColorCorrection
+    RemoveDepthOfField = true,   -- убрать DepthOfField
+    TerrainLowQuality = true,    -- понизить качество воды/террейна
+    KillSounds = false,          -- глушить все звуки (по желанию)
+    -- ⛔ ВСЁ ЧТО СВЯЗАНО С UI — ОТКЛЮЧЕНО НАВСЕГДА
+    HideGameUI = false,
+    HideChat = false,
+    HideTopbar = false,
 }
 
 -- ==================== FPS СЧЁТЧИК ====================
@@ -204,39 +205,6 @@ local function setGraphicsLow()
     end
 end
 
--- ★ НОВОЕ: скрывает только ИГРОВОЙ UI, не трогает Delta/Roblox
-local function hideGameUI()
-    if not SETTINGS.HideGameUI then return end
-
-    -- 1. Отключаем стандартный топбар Roblox (только в игре)
-    pcall(function()
-        StarterGui:SetCore("TopbarEnabled", false)
-    end)
-
-    -- 2. Скрываем чат
-    if SETTINGS.HideChat then
-        pcall(function()
-            StarterGui:SetCore("ChatWindowSize", UDim2.new(0, 0, 0, 0))
-            StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, false)
-        end)
-    end
-
-    -- 3. Скрываем игровой интерфейс (но НЕ CoreGui Delta!)
-    for _, obj in ipairs(LocalPlayer:WaitForChild("PlayerGui"):GetChildren()) do
-        if obj:IsA("ScreenGui") and obj.Name ~= "OptimizerUI" then
-            pcall(function() obj.Enabled = false end)
-        end
-    end
-
-    -- 4. Следим, чтобы новые ScreenGui игры тоже скрывались
-    LocalPlayer.PlayerGui.ChildAdded:Connect(function(obj)
-        task.wait(0.1)
-        if obj:IsA("ScreenGui") and obj.Name ~= "OptimizerUI" then
-            pcall(function() obj.Enabled = false end)
-        end
-    end)
-end
-
 -- ==================== ЗАПУСК С ЗАМЕРОМ ====================
 local function runOptimization(onStatus)
     local status = onStatus or function() end
@@ -250,7 +218,6 @@ local function runOptimization(onStatus)
     optimizeTerrain()
     hookAll()
     setGraphicsLow()
-    hideGameUI()
     task.wait(0.3)
 
     status("📊 Замер FPS после оптимизации...")
@@ -283,7 +250,7 @@ local function runOptimization(onStatus)
     )
 end
 
--- ==================== UI ====================
+-- ==================== UI ОПТИМИЗАТОРА (только своё) ====================
 local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "OptimizerUI"
 screenGui.ResetOnSpawn = false
@@ -308,7 +275,7 @@ mainStroke.Color = Color3.fromRGB(120, 255, 160)
 mainStroke.Thickness = 1.5
 
 local panel = Instance.new("Frame")
-panel.Size = UDim2.new(0, 280, 0, 340)
+panel.Size = UDim2.new(0, 280, 0, 310)
 panel.Position = UDim2.new(0, 90, 0, 170)
 panel.BackgroundColor3 = Color3.fromRGB(20, 28, 24)
 panel.BackgroundTransparency = 0.1
@@ -324,7 +291,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -16, 0, 26)
 title.Position = UDim2.new(0, 8, 0, 6)
 title.BackgroundTransparency = 1
-title.Text = "⚡ OPTIMIZER v3.1"
+title.Text = "⚡ OPTIMIZER v3.2"
 title.TextColor3 = Color3.fromRGB(180, 255, 200)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 13
@@ -355,7 +322,7 @@ resultLabel.TextSize = 11
 resultLabel.TextWrapped = true
 resultLabel.TextXAlignment = Enum.TextXAlignment.Left
 resultLabel.TextYAlignment = Enum.TextYAlignment.Top
-resultLabel.Text = "Нажми кнопку ниже, чтобы\nзамерить FPS и оптимизировать."
+resultLabel.Text = "Нажми кнопку ниже, чтобы\nзамерить FPS и оптимизировать.\n\n(UI не трогается)"
 resultLabel.Parent = panel
 Instance.new("UICorner", resultLabel).CornerRadius = UDim.new(0, 8)
 
@@ -383,31 +350,18 @@ resetBtn.AutoButtonColor = true
 resetBtn.Parent = panel
 Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 8)
 
--- ★ Кнопка возврата игрового UI
-local restoreBtn = Instance.new("TextButton")
-restoreBtn.Size = UDim2.new(1, -16, 0, 26)
-restoreBtn.Position = UDim2.new(0, 8, 0, 272)
-restoreBtn.BackgroundColor3 = Color3.fromRGB(35, 50, 65)
-restoreBtn.TextColor3 = Color3.fromRGB(180, 220, 255)
-restoreBtn.Font = Enum.Font.GothamBold
-restoreBtn.TextSize = 11
-restoreBtn.Text = "🔙 Вернуть игровой UI"
-restoreBtn.AutoButtonColor = true
-restoreBtn.Parent = panel
-Instance.new("UICorner", restoreBtn).CornerRadius = UDim.new(0, 8)
-
 local infoLabel = Instance.new("TextLabel")
-infoLabel.Size = UDim2.new(1, -16, 0, 30)
-infoLabel.Position = UDim2.new(0, 8, 0, 304)
+infoLabel.Size = UDim2.new(1, -16, 0, 26)
+infoLabel.Position = UDim2.new(0, 8, 0, 272)
 infoLabel.BackgroundTransparency = 1
-infoLabel.Text = "Иконки Delta и Roblox не затрагиваются"
-infoLabel.TextColor3 = Color3.fromRGB(140, 180, 160)
+infoLabel.Text = "🛡️ Кнопки игры / Delta / Roblox не скрываются"
+infoLabel.TextColor3 = Color3.fromRGB(140, 200, 160)
 infoLabel.Font = Enum.Font.Gotham
 infoLabel.TextSize = 10
 infoLabel.TextWrapped = true
 infoLabel.Parent = panel
 
--- ==================== ЖИВОЙ FPS В UI ====================
+-- ==================== ЖИВОЙ FPS ====================
 task.spawn(function()
     while task.wait(0.5) do
         if liveFpsLabel and liveFpsLabel.Parent then
@@ -460,20 +414,6 @@ resetBtn.Activated:Connect(function()
     fpsState.before = 0
     fpsState.after = 0
     resultLabel.Text = "🔄 Счётчик сброшен.\nНажми «ОПТИМИЗИРОВАТЬ»,\nчтобы замерить FPS заново."
-end)
-
--- ★ Возврат игрового UI
-restoreBtn.Activated:Connect(function()
-    pcall(function()
-        StarterGui:SetCore("TopbarEnabled", true)
-        StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.Chat, true)
-    end)
-    for _, obj in ipairs(LocalPlayer:WaitForChild("PlayerGui"):GetChildren()) do
-        if obj:IsA("ScreenGui") and obj.Name ~= "OptimizerUI" then
-            pcall(function() obj.Enabled = true end)
-        end
-    end
-    resultLabel.Text = "🔙 Игровой UI возвращён.\n(иконки Delta и Roblox и так не трогались)"
 end)
 
 -- ==================== ПЕРЕТАСКИВАНИЕ ====================

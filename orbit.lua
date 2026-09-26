@@ -1,10 +1,9 @@
 --[[
     ╔══════════════════════════════════════════════════════════╗
-    ║   OPTIMIZER v5.5 — PRO CAMERA                            ║
-    ║   + Камера смотрит далеко вниз/вверх                     ║
-    ║   + Ползунок расстояния (дистанция камеры)               ║
-    ║   + Пресеты дистанции: 50, 100, 250, 500, 1000           ║
-    ║   + Скрытие игроков + FOV + оптимизация                  ║
+    ║   OPTIMIZER v5.6 — FIX PLAYERS + MIN CAMERA              ║
+    ║   + ИСПРАВЛЕНО скрытие игроков (каждый кадр)             ║
+    ║   + Камера от 0.5 стад (очень близко)                    ║
+    ║   + Пресеты дистанции: 1, 5, 10, 50, 250, 1000           ║
     ║   + НЕ трогает UI игры / Delta / Roblox                  ║
     ╚══════════════════════════════════════════════════════════╝
 --]]
@@ -21,9 +20,9 @@ local LocalPlayer = Players.LocalPlayer
 local SETTINGS = {
     FOV = 90,
     CameraZoomMax = 500,
-    CameraZoomMin = 0.1,
+    CameraZoomMin = 0.5,
     ExtendCameraPitch = true,
-    PitchLimit = 89,          -- почти вертикально вниз/вверх
+    PitchLimit = 89,
     HideOtherPlayers = true,
     PlayerHideDistance = 50,
     RemoveParticles = true,
@@ -67,7 +66,7 @@ local function measureFPS(duration)
     return math.floor(frames / (tick() - startT) + 0.5)
 end
 
--- ==================== ★ PRO КАМЕРА ====================
+-- ==================== ПРО КАМЕРА ====================
 local cameraBoosted = false
 local origZoomMax, origZoomMin, origFOV
 
@@ -87,7 +86,6 @@ local function applyCamera()
         cam.FieldOfView = SETTINGS.FOV
     end
 
-    -- ★ Расширяем лимит наклона вверх/вниз
     task.spawn(function()
         local ok, PlayerModule = pcall(function()
             return require(LocalPlayer.PlayerScripts:WaitForChild("PlayerModule", 10))
@@ -95,14 +93,12 @@ local function applyCamera()
         if ok and PlayerModule then
             local cameras = PlayerModule:GetCameras()
             local active = cameras and cameras.activeCameraController
-
             if active then
                 pcall(function() active.MIN_Y = -SETTINGS.PitchLimit end)
                 pcall(function() active.MAX_Y =  SETTINGS.PitchLimit end)
                 pcall(function() active.minPitch = -SETTINGS.PitchLimit end)
                 pcall(function() active.maxPitch =  SETTINGS.PitchLimit end)
             end
-
             local oc = cameras and cameras.activeOcclusion
             if oc then
                 pcall(function() oc.enabled = false end)
@@ -129,92 +125,107 @@ end
 
 local function setZoomDistance(v)
     SETTINGS.CameraZoomMax = v
-    pcall(function()
-        LocalPlayer.CameraMaxZoomDistance = v
-    end)
+    pcall(function() LocalPlayer.CameraMaxZoomDistance = v end)
 end
 
 applyCamera()
 
--- ==================== СКРЫТИЕ ИГРОКОВ ====================
-local hiddenPlayers = {}
+-- ==================== ★ ИСПРАВЛЕНО: СКРЫТИЕ ИГРОКОВ (КАЖДЫЙ КАДР) ====================
+local hiddenPlayers = {}       -- [plr] = { parts = {...}, applied = true }
 local playerHideConn = nil
 
-local function hidePlayerParts(plr)
-    if not plr or plr == LocalPlayer then return end
-    if hiddenPlayers[plr] then return end
+local function collectParts(plr)
     local char = plr.Character
-    if not char then return end
-
+    if not char then return nil end
     local parts = {}
-    local function processObj(obj)
+    for _, obj in ipairs(char:GetDescendants()) do
         if obj:IsA("BasePart") or obj:IsA("Decal") or obj:IsA("ParticleEmitter")
             or obj:IsA("Trail") or obj:IsA("Beam") or obj:IsA("Fire") or obj:IsA("Smoke") then
             table.insert(parts, {
                 obj = obj,
-                transparency = obj.Transparency,
-                localTrans = obj:IsA("BasePart") and obj.LocalTransparencyModifier or nil,
-                enabled = obj.Enabled,
                 isPart = obj:IsA("BasePart"),
             })
-            pcall(function()
-                if obj:IsA("BasePart") then
-                    obj.Transparency = 1
-                    obj.LocalTransparencyModifier = 1
-                    obj.CanCollide = false
-                    obj.CanQuery = false
-                    obj.CanTouch = false
-                else
-                    obj.Transparency = 1
-                    obj.Enabled = false
-                end
-            end)
         end
     end
+    return parts
+end
 
-    processObj(char)
-    for _, obj in ipairs(char:GetDescendants()) do processObj(obj) end
-
+-- ★ Применяем ВИЗУАЛЬНОЕ скрытие (без запоминания оригинала — просто ставим каждый кадр)
+local function applyHide(plr)
+    local char = plr.Character
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            pcall(function()
+                obj.LocalTransparencyModifier = 1
+                obj.Transparency = 1
+                obj.CastShadow = false
+            end)
+        elseif obj:IsA("Decal") or obj:IsA("Texture") then
+            pcall(function() obj.Transparency = 1 end)
+        elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail")
+            or obj:IsA("Beam") or obj:IsA("Fire") or obj:IsA("Smoke") then
+            pcall(function() obj.Enabled = false end)
+        end
+    end
     local ff = char:FindFirstChildOfClass("ForceField")
     if ff then pcall(function() ff.Visible = false end) end
 
-    hiddenPlayers[plr] = parts
+    -- Также скрываем содержимое аксессуаров (они в отдельной папке)
+    for _, obj in ipairs(char:GetChildren()) do
+        if obj.Name == "Humanoid" then
+            pcall(function() obj.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None end)
+        end
+    end
 end
 
-local function showPlayerParts(plr)
-    if not hiddenPlayers[plr] then return end
-    for _, data in ipairs(hiddenPlayers[plr]) do
-        pcall(function()
-            if data.obj then
-                data.obj.Transparency = data.transparency or 0
-                if data.isPart and data.localTrans ~= nil then
-                    data.obj.LocalTransparencyModifier = data.localTrans
-                end
-                if not data.isPart then
-                    data.obj.Enabled = data.enabled ~= false
-                end
-                if data.isPart then
-                    data.obj.CanCollide = true
-                    data.obj.CanQuery = true
-                    data.obj.CanTouch = true
-                end
-            end
-        end)
+-- ★ Возвращаем видимость
+local function applyShow(plr)
+    local char = plr.Character
+    if not char then return end
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") then
+            pcall(function()
+                obj.LocalTransparencyModifier = 0
+                obj.Transparency = 0
+                obj.CastShadow = true
+            end)
+        elseif obj:IsA("Decal") or obj:IsA("Texture") then
+            pcall(function() obj.Transparency = 0 end)
+        elseif obj:IsA("ParticleEmitter") or obj:IsA("Trail")
+            or obj:IsA("Beam") or obj:IsA("Fire") or obj:IsA("Smoke") then
+            pcall(function() obj.Enabled = true end)
+        end
     end
-    hiddenPlayers[plr] = nil
+    local ff = char:FindFirstChildOfClass("ForceField")
+    if ff then pcall(function() ff.Visible = true end) end
+    for _, obj in ipairs(char:GetChildren()) do
+        if obj.Name == "Humanoid" then
+            pcall(function() obj.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.Viewer end)
+        end
+    end
 end
 
 local function showAllPlayers()
-    for plr in pairs(hiddenPlayers) do showPlayerParts(plr) end
+    for plr in pairs(hiddenPlayers) do applyShow(plr) end
+    hiddenPlayers = {}
 end
 
+-- ★ ЦИКЛ: в RenderStepped (каждый кадр) проверяем и применяем скрытие/показ
+local hideLoopConn = nil
+
 local function hookPlayers()
-    if playerHideConn then playerHideConn:Disconnect(); playerHideConn = nil end
-    playerHideConn = RunService.Heartbeat:Connect(function()
+    if hideLoopConn then hideLoopConn:Disconnect(); hideLoopConn = nil end
+
+    hideLoopConn = RunService.RenderStepped:Connect(function()
         if not SETTINGS.HideOtherPlayers then
-            if next(hiddenPlayers) then showAllPlayers() end
+            if next(hiddenPlayers) then
+                for plr in pairs(hiddenPlayers) do applyShow(plr) end
+                hiddenPlayers = {}
+            end
             return
         end
+
         local myChar = LocalPlayer.Character
         local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
         if not myRoot then return end
@@ -227,12 +238,23 @@ local function hookPlayers()
                 if root and root.Parent then
                     local dist = (root.Position - myPos).Magnitude
                     if dist > SETTINGS.PlayerHideDistance then
-                        hidePlayerParts(plr)
+                        -- Скрываем (применяем КАЖДЫЙ кадр)
+                        if not hiddenPlayers[plr] then
+                            hiddenPlayers[plr] = true
+                        end
+                        applyHide(plr)
                     else
-                        if hiddenPlayers[plr] then showPlayerParts(plr) end
+                        -- Показываем
+                        if hiddenPlayers[plr] then
+                            applyShow(plr)
+                            hiddenPlayers[plr] = nil
+                        end
                     end
                 else
-                    if hiddenPlayers[plr] then showPlayerParts(plr) end
+                    if hiddenPlayers[plr] then
+                        applyShow(plr)
+                        hiddenPlayers[plr] = nil
+                    end
                 end
             end
         end
@@ -434,7 +456,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -16, 0, 26)
 title.Position = UDim2.new(0, 8, 0, 6)
 title.BackgroundTransparency = 1
-title.Text = "⚡ OPTIMIZER v5.5 — PRO CAM"
+title.Text = "⚡ OPTIMIZER v5.6"
 title.TextColor3 = Color3.fromRGB(180, 255, 200)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 12
@@ -457,7 +479,7 @@ local statusLabel = Instance.new("TextLabel")
 statusLabel.Size = UDim2.new(1, -16, 0, 20)
 statusLabel.Position = UDim2.new(0, 8, 0, 62)
 statusLabel.BackgroundTransparency = 1
-statusLabel.Text = "👥 Скрыто: 0  |  📷 FOV: 90  |  📏 Дист: 500"
+statusLabel.Text = "👥 Скрыто: 0  |  📷 90°  |  📏 500"
 statusLabel.TextColor3 = Color3.fromRGB(140, 200, 255)
 statusLabel.Font = Enum.Font.GothamBold
 statusLabel.TextSize = 10
@@ -504,7 +526,7 @@ makePresetBtn("🟢 Низкая",  8,  95, 154, "Low",    Color3.fromRGB(35, 65
 makePresetBtn("🟡 Средняя", 110, 95, 154, "Medium", Color3.fromRGB(75, 65, 25))
 makePresetBtn("🔴 Высокая", 212, 95, 154, "High",   Color3.fromRGB(75, 35, 35))
 
--- ==================== ★ ДИСТАНЦИЯ КАМЕРЫ (ползунок + кнопки) ====================
+-- ==================== ★ ДИСТАНЦИЯ КАМЕРЫ ====================
 local zoomLabel = Instance.new("TextLabel")
 zoomLabel.Size = UDim2.new(1, -16, 0, 18)
 zoomLabel.Position = UDim2.new(0, 8, 0, 194)
@@ -516,7 +538,6 @@ zoomLabel.TextSize = 11
 zoomLabel.TextXAlignment = Enum.TextXAlignment.Left
 zoomLabel.Parent = panel
 
--- ★ Ползунок расстояния
 local sliderBg = Instance.new("Frame")
 sliderBg.Size = UDim2.new(1, -16, 0, 16)
 sliderBg.Position = UDim2.new(0, 8, 0, 216)
@@ -551,10 +572,14 @@ zoomValueLabel.Font = Enum.Font.GothamBold
 zoomValueLabel.TextSize = 10
 zoomValueLabel.Parent = panel
 
-local ZOOM_MIN, ZOOM_MAX = 10, 2000
-local function setSliderValue(t)   -- t = 0..1
+-- ★ Минимум теперь 0.5 стад
+local ZOOM_MIN, ZOOM_MAX = 0.5, 2000
+local function setSliderValue(t)
     t = math.clamp(t, 0, 1)
-    local v = math.floor(ZOOM_MIN + (ZOOM_MAX - ZOOM_MIN) * t)
+    local v = ZOOM_MIN + (ZOOM_MAX - ZOOM_MIN) * t
+    -- Округляем до разумного
+    if v < 10 then v = math.floor(v * 10) / 10
+    else v = math.floor(v) end
     sliderFill.Size = UDim2.new(t, 0, 1, 0)
     sliderKnob.Position = UDim2.new(t, -10, 0, -2)
     zoomValueLabel.Text = "Значение: " .. v .. " стад"
@@ -582,7 +607,6 @@ UserInputService.InputChanged:Connect(function(input)
         setSliderValue(rel)
     end
 end)
--- Тап по полосе
 sliderBg.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.Touch
         or input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -591,8 +615,8 @@ sliderBg.InputBegan:Connect(function(input)
     end
 end)
 
--- ★ Кнопки быстрой дистанции
-local zoomPresets = { 50, 100, 250, 500, 1000, 2000 }
+-- ★ Обновлённые пресеты дистанции (с маленькими значениями)
+local zoomPresets = { 1, 5, 10, 50, 250, 1000 }
 for i, v in ipairs(zoomPresets) do
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(0, 47, 0, 24)
@@ -785,8 +809,8 @@ task.spawn(function()
         if statusLabel and statusLabel.Parent then
             local pn = 0
             for _ in pairs(hiddenPlayers) do pn = pn + 1 end
-            statusLabel.Text = string.format("👥 %d | 📷 %d° | 📏 %d",
-                pn, SETTINGS.FOV, SETTINGS.CameraZoomMax)
+            statusLabel.Text = string.format("👥 %d | 📷 %d° | 📏 %s",
+                pn, SETTINGS.FOV, tostring(SETTINGS.CameraZoomMax))
         end
     end
 end)

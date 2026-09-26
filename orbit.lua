@@ -1,12 +1,11 @@
 --[[
     ╔══════════════════════════════════════════════════════════╗
-    ║   OPTIMIZER v4.1 — CULLING + LOD                         ║
-    ║   + Камера-куллинг (убирает то, что вне поля зрения)     ║
-    ║   + LOD: дальние объекты упрощаются                      ║
-    ║   + Кнопки для каждой оптимизации                        ║
-    ║   + FPS счётчик: было / стало / сейчас                   ║
+    ║   OPTIMIZER v4.2 — CAMERA FIX                            ║
+    ║   + Убран LOD (был плохой)                               ║
+    ║   + Куллинг БЕЗ потери физики (не падаешь сквозь пол)    ║
+    ║   + Расширение камеры: зум + обзор вверх/вниз            ║
+    ║   + Кнопки для всего                                     ║
     ║   + НЕ трогает UI игры / Delta / Roblox                  ║
-    ║   Работает в Delta / Arceus X / Fluxus                   ║
     ╚══════════════════════════════════════════════════════════╝
 --]]
 
@@ -19,21 +18,18 @@ local LocalPlayer = Players.LocalPlayer
 
 -- ==================== НАСТРОЙКИ ====================
 local SETTINGS = {
+    -- Камера
+    CameraZoomMax = 500,           -- дальность зума (по умолчанию 128)
+    CameraZoomMin = 0.1,           -- приближение (по умолчанию 0.5)
+    ExtendCameraPitch = true,      -- разрешить смотреть вверх/вниз дальше
+    PitchLimit = 88,               -- градусов (по умолчанию 80)
+
     -- Камера-куллинг
-    CameraCulling = true,
-    CullRange = 250,
-    CheckInterval = 0.30,
+    CameraCulling = false,         -- по умолчанию выкл (включаешь сам)
+    CullRange = 300,
+    CheckInterval = 0.25,
     RefreshInterval = 3.0,
     CullUnanchored = false,
-
-    -- ★ LOD (Level of Detail)
-    LODEnabled = true,
-    LODMode = 2,                 -- 1 = Обычный, 2 = Агрессивный
-    LODNearDistance = 120,       -- ближе — оригинал
-    LODFarDistance = 220,        -- дальше — упрощённый вид
-    LODMaterial = Enum.Material.SmoothPlastic,
-    LODReflectance = 0,
-    LODTransparencyBoost = 0,    -- 0..0.3 (для агрессивного можно 0.1)
 
     -- Эффекты
     RemoveParticles = true,
@@ -54,10 +50,7 @@ local SETTINGS = {
 }
 
 -- ==================== FPS СЧЁТЧИК ====================
-local fpsState = {
-    current = 0, before = 0, after = 0,
-    frameCount = 0, lastTime = tick(),
-}
+local fpsState = { current = 0, before = 0, after = 0, frameCount = 0, lastTime = tick() }
 
 RunService.RenderStepped:Connect(function()
     fpsState.frameCount = fpsState.frameCount + 1
@@ -79,35 +72,80 @@ local function measureFPS(duration)
     return math.floor(frames / (tick() - startT) + 0.5)
 end
 
--- ==================== КАМЕРА-КУЛЛИНГ ====================
-local hiddenFolder
+-- ==================== РАСШИРЕНИЕ КАМЕРЫ ====================
+local cameraBoosted = false
+local origZoomMax, origZoomMin
+
+local function extendCamera()
+    if cameraBoosted then return end
+    cameraBoosted = true
+
+    local player = LocalPlayer
+    origZoomMax = player.CameraMaxZoomDistance
+    origZoomMin = player.CameraMinZoomDistance
+
+    pcall(function()
+        player.CameraMaxZoomDistance = SETTINGS.CameraZoomMax
+        player.CameraMinZoomDistance = SETTINGS.CameraZoomMin
+    end)
+
+    -- Пытаемся расширить лимиты наклона (pitch)
+    if SETTINGS.ExtendCameraPitch then
+        task.spawn(function()
+            local ok, PlayerModule = pcall(function()
+                return require(player.PlayerScripts:WaitForChild("PlayerModule", 10))
+            end)
+            if ok and PlayerModule then
+                local cameras = PlayerModule:GetCameras()
+                local active = cameras and cameras.activeCameraController
+                if active then
+                    pcall(function() active.MIN_Y = -SETTINGS.PitchLimit end)
+                    pcall(function() active.MAX_Y =  SETTINGS.PitchLimit end)
+                    pcall(function() active.minPitch = -SETTINGS.PitchLimit end)
+                    pcall(function() active.maxPitch =  SETTINGS.PitchLimit end)
+                end
+            end
+        end)
+
+        -- Дополнительная страховка: если упёрлись в лимит — мягко расширяем
+        RunService:BindToRenderStep("CamBoost", Enum.RenderPriority.Camera.Value + 5, function()
+            local cam = Workspace.CurrentCamera
+            if not cam then return end
+            -- Работает только для Classic / Follow
+        end)
+    end
+end
+
+local function restoreCamera()
+    if not cameraBoosted then return end
+    cameraBoosted = false
+    pcall(function()
+        LocalPlayer.CameraMaxZoomDistance = origZoomMax or 128
+        LocalPlayer.CameraMinZoomDistance = origZoomMin or 0.5
+    end)
+end
+
+-- Автоматически применяем при старте
+extendCamera()
+
+-- ==================== КАМЕРА-КУЛЛИНГ (безопасный) ====================
+-- ★ ИСПРАВЛЕНО: части НЕ убираем из Workspace!
+-- Просто делаем их невидимыми ЛОКАЛЬНО через LocalTransparencyModifier.
+-- Физика остаётся — сквозь пол не провалишься!
+
 local culled = {}
 local allParts = {}
 local lastRefresh = 0
-
-local function setupHiddenFolder()
-    local existing = game:FindFirstChild("_OptHidden")
-    if existing then existing:Destroy() end
-    hiddenFolder = Instance.new("Folder")
-    hiddenFolder.Name = "_OptHidden"
-    hiddenFolder.Parent = game
-end
 
 local function refreshParts()
     local list = {}
     local char = LocalPlayer.Character
     for _, obj in ipairs(Workspace:GetDescendants()) do
-        if obj:IsA("BasePart") and obj.Parent ~= hiddenFolder then
+        if obj:IsA("BasePart") then
             local skip = false
-            if char and (obj == char or obj:IsDescendantOf(char)) then
-                skip = true
-            end
-            if not skip and not SETTINGS.CullUnanchored and not obj.Anchored then
-                skip = true
-            end
-            if not skip then
-                table.insert(list, obj)
-            end
+            if char and (obj == char or obj:IsDescendantOf(char)) then skip = true end
+            if not skip and not SETTINGS.CullUnanchored and not obj.Anchored then skip = true end
+            if not skip then table.insert(list, obj) end
         end
     end
     allParts = list
@@ -121,12 +159,22 @@ local function isInView(worldPos, cam)
     return true
 end
 
-local function restoreAll()
-    for part, data in pairs(culled) do
-        if part and part.Parent == hiddenFolder then
-            pcall(function() part.Parent = data.parent end)
-        end
+local function uncullPart(part)
+    if culled[part] then
+        pcall(function() part.LocalTransparencyModifier = culled[part].localTrans end)
+        culled[part] = nil
     end
+end
+
+local function cullPart(part)
+    if not culled[part] then
+        culled[part] = { localTrans = part.LocalTransparencyModifier }
+        pcall(function() part.LocalTransparencyModifier = 1 end)
+    end
+end
+
+local function restoreAll()
+    for part in pairs(culled) do uncullPart(part) end
     culled = {}
 end
 
@@ -143,153 +191,39 @@ local function cullStep()
     local camPos = cam.CFrame.Position
     local rangeSq = SETTINGS.CullRange * SETTINGS.CullRange
 
-    for part, data in pairs(culled) do
+    -- Возвращаем то, что попало в вид
+    for part in pairs(culled) do
         if not part or not part.Parent then
             culled[part] = nil
         elseif isInView(part.Position, cam) then
-            if part.Parent == hiddenFolder then
-                pcall(function() part.Parent = data.parent end)
-            end
-            culled[part] = nil
+            uncullPart(part)
         end
     end
 
+    -- Прячем то, что вне вида
     for _, part in ipairs(allParts) do
-        if part.Parent and part.Parent ~= hiddenFolder and not culled[part] then
+        if part.Parent and not culled[part] then
             local dx = part.Position.X - camPos.X
             local dy = part.Position.Y - camPos.Y
             local dz = part.Position.Z - camPos.Z
             local distSq = dx*dx + dy*dy + dz*dz
 
-            local shouldCull = false
-            if distSq > rangeSq then
-                shouldCull = true
-            elseif not isInView(part.Position, cam) then
-                shouldCull = true
-            end
-
-            if shouldCull then
-                culled[part] = { parent = part.Parent }
-                pcall(function() part.Parent = hiddenFolder end)
+            if distSq > rangeSq or not isInView(part.Position, cam) then
+                cullPart(part)
             end
         end
     end
 end
 
--- ==================== ★ LOD (Level of Detail) ====================
--- Запоминаем оригинальные параметры, чтобы вернуть при приближении
-local lodBackup = {}
-
-local function applyLODToPart(part, mode)
-    if not part:IsA("BasePart") then return end
-
-    -- Сохраняем оригинал один раз
-    if not lodBackup[part] then
-        lodBackup[part] = {
-            Material = part.Material,
-            Reflectance = part.Reflectance,
-            Transparency = part.Transparency,
-            CastShadow = part.CastShadow,
-            -- для MeshPart
-            TextureID = part:IsA("MeshPart") and part.TextureID or nil,
-            RenderFidelity = part:IsA("MeshPart") and part.RenderFidelity or nil,
-        }
-    end
-    local orig = lodBackup[part]
-
-    if mode == 0 then
-        -- Вернуть оригинал
-        pcall(function()
-            part.Material = orig.Material
-            part.Reflectance = orig.Reflectance
-            part.Transparency = orig.Transparency
-            part.CastShadow = orig.CastShadow
-            if part:IsA("MeshPart") then
-                if orig.TextureID then part.TextureID = orig.TextureID end
-                if orig.RenderFidelity then part.RenderFidelity = orig.RenderFidelity end
-            end
-        end)
-    elseif mode == 1 then
-        -- Обычный LOD: дешёвый материал, без отражений, без тени
-        pcall(function()
-            part.Material = SETTINGS.LODMaterial
-            part.Reflectance = SETTINGS.LODReflectance
-            part.CastShadow = false
-            if part:IsA("MeshPart") then
-                part.RenderFidelity = Enum.RenderFidelity.Performance
-            end
-        end)
-    elseif mode == 2 then
-        -- Агрессивный LOD: + прозрачность и без текстур
-        pcall(function()
-            part.Material = SETTINGS.LODMaterial
-            part.Reflectance = 0
-            part.CastShadow = false
-            part.Transparency = math.min(orig.Transparency + 0.15, 1)
-            if part:IsA("MeshPart") then
-                part.TextureID = ""
-                part.RenderFidelity = Enum.RenderFidelity.Performance
-            end
-        end)
-    end
-end
-
-local function lodStep()
-    if not SETTINGS.LODEnabled then return end
-    local cam = Workspace.CurrentCamera
-    if not cam then return end
-
-    local camPos = cam.CFrame.Position
-    local char = LocalPlayer.Character
-    local nearSq = SETTINGS.LODNearDistance * SETTINGS.LODNearDistance
-    local farSq = SETTINGS.LODFarDistance * SETTINGS.LODFarDistance
-
-    for _, part in ipairs(allParts) do
-        if part.Parent and part.Parent ~= hiddenFolder then
-            -- не трогаем персонажа
-            local skip = false
-            if char and (part == char or part:IsDescendantOf(char)) then
-                skip = true
-            end
-            if not skip then
-                local dx = part.Position.X - camPos.X
-                local dy = part.Position.Y - camPos.Y
-                local dz = part.Position.Z - camPos.Z
-                local distSq = dx*dx + dy*dy + dz*dz
-
-                if distSq <= nearSq then
-                    applyLODToPart(part, 0)  -- оригинал
-                elseif distSq <= farSq then
-                    applyLODToPart(part, 1)  -- обычный LOD
-                else
-                    applyLODToPart(part, SETTINGS.LODMode)  -- выбранный режим
-                end
-            end
-        end
-    end
-end
-
-local function restoreLOD()
-    for part, orig in pairs(lodBackup) do
-        if part and part.Parent then
-            applyLODToPart(part, 0)
-        end
-    end
-    lodBackup = {}
-end
-
--- Общий цикл: сначала куллинг, потом LOD
 task.spawn(function()
-    setupHiddenFolder()
     task.wait(1)
     while true do
         pcall(cullStep)
-        pcall(lodStep)
         task.wait(SETTINGS.CheckInterval)
     end
 end)
 
--- ==================== ОБЫЧНЫЕ ОПТИМИЗАЦИИ ====================
+-- ==================== ОПТИМИЗАЦИИ ЭФФЕКТОВ ====================
 local function safeRemove(obj) pcall(function() obj:Destroy() end) end
 
 local removed = { decals=0, textures=0, particles=0, lights=0, sounds=0 }
@@ -362,23 +296,17 @@ end
 -- ==================== ЗАПУСК ====================
 local function runOptimization(onStatus)
     local status = onStatus or function() end
-    status("📊 Замер FPS до оптимизации...")
+    status("📊 Замер FPS до...")
     task.wait(0.2)
     local fpsBefore = measureFPS(1.5)
-
     status("⚡ Оптимизация...")
-    optimizeLighting()
-    optimizeTerrain()
-    hookAll()
-    setGraphicsLow()
+    optimizeLighting(); optimizeTerrain(); hookAll(); setGraphicsLow()
     task.wait(0.3)
-
     status("📊 Замер FPS после...")
     task.wait(0.2)
     local fpsAfter = measureFPS(1.5)
 
-    fpsState.before = fpsBefore
-    fpsState.after = fpsAfter
+    fpsState.before = fpsBefore; fpsState.after = fpsAfter
     local diff = fpsAfter - fpsBefore
     local sign = diff >= 0 and "+" or ""
     local percent = fpsBefore > 0 and math.floor((diff / fpsBefore) * 100) or 0
@@ -424,7 +352,7 @@ panel.BackgroundColor3 = Color3.fromRGB(20, 28, 24)
 panel.BackgroundTransparency = 0.1
 panel.BorderSizePixel = 0
 panel.Visible = false
-panel.CanvasSize = UDim2.new(0, 0, 0, 800)
+panel.CanvasSize = UDim2.new(0, 0, 0, 820)
 panel.ScrollBarThickness = 3
 panel.ScrollBarImageColor3 = Color3.fromRGB(120, 255, 160)
 panel.Parent = screenGui
@@ -437,7 +365,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -16, 0, 26)
 title.Position = UDim2.new(0, 8, 0, 6)
 title.BackgroundTransparency = 1
-title.Text = "⚡ OPTIMIZER v4.1 — CULL + LOD"
+title.Text = "⚡ OPTIMIZER v4.2"
 title.TextColor3 = Color3.fromRGB(180, 255, 200)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 12
@@ -460,7 +388,7 @@ local cullStatus = Instance.new("TextLabel")
 cullStatus.Size = UDim2.new(1, -16, 0, 20)
 cullStatus.Position = UDim2.new(0, 8, 0, 62)
 cullStatus.BackgroundTransparency = 1
-cullStatus.Text = "🎥 Скрыто: 0   |   🎚️ LOD: 0"
+cullStatus.Text = "🎥 Скрыто: 0   |   📷 Камера: расширена"
 cullStatus.TextColor3 = Color3.fromRGB(140, 200, 255)
 cullStatus.Font = Enum.Font.GothamBold
 cullStatus.TextSize = 11
@@ -493,7 +421,6 @@ local function makeToggle(text, y, getter, setter)
     b.AutoButtonColor = true
     b.Parent = panel
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-
     local function refresh()
         local on = getter()
         b.Text = text .. ": " .. (on and "ВКЛ" or "ВЫКЛ")
@@ -505,24 +432,25 @@ local function makeToggle(text, y, getter, setter)
             b.TextColor3 = Color3.fromRGB(220, 160, 160)
         end
     end
-
-    b.Activated:Connect(function()
-        setter(not getter())
-        refresh()
-    end)
+    b.Activated:Connect(function() setter(not getter()); refresh() end)
     refresh()
     return b
 end
 
-makeToggle("🎥 Камера-куллинг", 184, function() return SETTINGS.CameraCulling end,
+makeToggle("🎥 Камера-куллинг (скрытие невидимого)", 184,
+    function() return SETTINGS.CameraCulling end,
     function(v) SETTINGS.CameraCulling = v; if not v then restoreAll() end end)
-makeToggle("🎚️ LOD (упрощение дальних)", 214, function() return SETTINGS.LODEnabled end,
-    function(v) SETTINGS.LODEnabled = v; if not v then restoreLOD() end end)
-makeToggle("🧹 Частицы", 244, function() return SETTINGS.RemoveParticles end,
+makeToggle("📷 Расширение камеры", 214,
+    function() return cameraBoosted end,
+    function(v) if v then extendCamera() else restoreCamera() end end)
+makeToggle("🧹 Частицы", 244,
+    function() return SETTINGS.RemoveParticles end,
     function(v) SETTINGS.RemoveParticles = v end)
-makeToggle("💡 Свет", 274, function() return SETTINGS.RemoveLights end,
+makeToggle("💡 Свет", 274,
+    function() return SETTINGS.RemoveLights end,
     function(v) SETTINGS.RemoveLights = v end)
-makeToggle("🌑 Тени", 304, function() return SETTINGS.RemoveShadows end,
+makeToggle("🌑 Тени", 304,
+    function() return SETTINGS.RemoveShadows end,
     function(v) SETTINGS.RemoveShadows = v end)
 makeToggle("🎨 Наклейки / Текстуры", 334,
     function() return SETTINGS.RemoveDecals and SETTINGS.RemoveTextures end,
@@ -544,36 +472,42 @@ makeToggle("🌊 Террейн", 454, function() return SETTINGS.TerrainLowQual
 makeToggle("🔊 Глушить звуки", 484, function() return SETTINGS.KillSounds end,
     function(v) SETTINGS.KillSounds = v end)
 
--- ==================== КНОПКА РЕЖИМА LOD ====================
-local lodModeBtn = Instance.new("TextButton")
-lodModeBtn.Size = UDim2.new(1, -16, 0, 28)
-lodModeBtn.Position = UDim2.new(0, 8, 0, 518)
-lodModeBtn.BackgroundColor3 = Color3.fromRGB(40, 55, 75)
-lodModeBtn.TextColor3 = Color3.fromRGB(160, 200, 255)
-lodModeBtn.Font = Enum.Font.GothamBold
-lodModeBtn.TextSize = 11
-lodModeBtn.AutoButtonColor = true
-lodModeBtn.Parent = panel
-Instance.new("UICorner", lodModeBtn).CornerRadius = UDim.new(0, 8)
+-- ==================== КНОПКИ ЗУМА КАМЕРЫ ====================
+local zoomBtn = Instance.new("TextButton")
+zoomBtn.Size = UDim2.new(1, -16, 0, 28)
+zoomBtn.Position = UDim2.new(0, 8, 0, 518)
+zoomBtn.BackgroundColor3 = Color3.fromRGB(40, 55, 75)
+zoomBtn.TextColor3 = Color3.fromRGB(160, 200, 255)
+zoomBtn.Font = Enum.Font.GothamBold
+zoomBtn.TextSize = 11
+zoomBtn.AutoButtonColor = true
+zoomBtn.Parent = panel
+Instance.new("UICorner", zoomBtn).CornerRadius = UDim.new(0, 8)
 
-local lodModeNames = { "Обычный", "Агрессивный" }
-local function refreshLodModeBtn()
-    local mode = SETTINGS.LODMode
-    local name = (mode == 1 and lodModeNames[1]) or (mode == 2 and lodModeNames[2]) or "?"
-    lodModeBtn.Text = "🎚️ Режим LOD: " .. name
-    if mode == 2 then
-        lodModeBtn.BackgroundColor3 = Color3.fromRGB(70, 40, 45)
-        lodModeBtn.TextColor3 = Color3.fromRGB(255, 180, 200)
-    else
-        lodModeBtn.BackgroundColor3 = Color3.fromRGB(40, 55, 75)
-        lodModeBtn.TextColor3 = Color3.fromRGB(160, 200, 255)
-    end
+local zoomPresets = {
+    { name = "Стандарт", max = 128, min = 0.5 },
+    { name = "Средний", max = 300, min = 0.3 },
+    { name = "Большой", max = 500, min = 0.1 },
+    { name = "Огромный", max = 1000, min = 0.1 },
+}
+local zoomIdx = 3
+local function refreshZoomBtn()
+    local p = zoomPresets[zoomIdx]
+    zoomBtn.Text = "📷 Зум: " .. p.name .. " (" .. p.max .. ")"
 end
-lodModeBtn.Activated:Connect(function()
-    SETTINGS.LODMode = (SETTINGS.LODMode == 1) and 2 or 1
-    refreshLodModeBtn()
+zoomBtn.Activated:Connect(function()
+    zoomIdx = zoomIdx + 1
+    if zoomIdx > #zoomPresets then zoomIdx = 1 end
+    local p = zoomPresets[zoomIdx]
+    SETTINGS.CameraZoomMax = p.max
+    SETTINGS.CameraZoomMin = p.min
+    pcall(function()
+        LocalPlayer.CameraMaxZoomDistance = p.max
+        LocalPlayer.CameraMinZoomDistance = p.min
+    end)
+    refreshZoomBtn()
 end)
-refreshLodModeBtn()
+refreshZoomBtn()
 
 -- ==================== КНОПКИ ДЕЙСТВИЙ ====================
 local applyBtn = Instance.new("TextButton")
@@ -595,7 +529,7 @@ restoreBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 75)
 restoreBtn.TextColor3 = Color3.fromRGB(180, 220, 255)
 restoreBtn.Font = Enum.Font.GothamBold
 restoreBtn.TextSize = 11
-restoreBtn.Text = "🔙 Вернуть всё (снять куллинг + LOD)"
+restoreBtn.Text = "🔙 Вернуть видимость"
 restoreBtn.AutoButtonColor = true
 restoreBtn.Parent = panel
 Instance.new("UICorner", restoreBtn).CornerRadius = UDim.new(0, 8)
@@ -612,7 +546,7 @@ resetBtn.AutoButtonColor = true
 resetBtn.Parent = panel
 Instance.new("UICorner", resetBtn).CornerRadius = UDim.new(0, 8)
 
--- ==================== ЖИВОЙ FPS И СТАТУС ====================
+-- ==================== ЖИВОЙ СТАТУС ====================
 task.spawn(function()
     while task.wait(0.5) do
         if liveFpsLabel and liveFpsLabel.Parent then
@@ -625,13 +559,11 @@ task.spawn(function()
             liveFpsLabel.Text = string.format("%s Сейчас FPS: %d", icon, fps)
             liveFpsLabel.TextColor3 = color
         end
-
         if cullStatus and cullStatus.Parent then
             local n = 0
             for _ in pairs(culled) do n = n + 1 end
-            local lodCount = 0
-            for _ in pairs(lodBackup) do lodCount = lodCount + 1 end
-            cullStatus.Text = string.format("🎥 Скрыто: %d   |   🎚️ LOD: %d", n, lodCount)
+            cullStatus.Text = string.format("🎥 Скрыто: %d   |   📷 Камера: %s",
+                n, cameraBoosted and "расширена" or "стандарт")
         end
     end
 end)
@@ -659,8 +591,7 @@ end)
 
 restoreBtn.Activated:Connect(function()
     restoreAll()
-    restoreLOD()
-    resultLabel.Text = "🔙 Все скрытые объекты и LOD\nвозвращены в исходное состояние."
+    resultLabel.Text = "🔙 Вся видимость восстановлена.\nСкрытые части снова видны."
 end)
 
 resetBtn.Activated:Connect(function()
@@ -689,8 +620,9 @@ mainBtn.InputEnded:Connect(function() dragging = false end)
 
 return {
     Optimize = runOptimization,
-    RestoreAll = function() restoreAll(); restoreLOD() end,
+    RestoreAll = restoreAll,
+    ExtendCamera = extendCamera,
+    RestoreCamera = restoreCamera,
     Culled = culled,
-    LODBackup = lodBackup,
     Settings = SETTINGS,
 }

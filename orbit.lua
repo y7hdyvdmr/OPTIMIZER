@@ -1,10 +1,11 @@
 --[[
     ╔══════════════════════════════════════════════════════════╗
-    ║   OPTIMIZER v5.0 — PRESETS + FOV + MAX FPS               ║
-    ║   + Пресеты: Низкая / Средняя / Высокая оптимизация      ║
-    ║   + FOV: полный экран телефона (70° – 120°)              ║
-    ║   + FPS-буст до 30-35 на слабых устройствах              ║
-    ║   + Безопасный куллинг (не проваливаешься сквозь пол)    ║
+    ║   OPTIMIZER v5.1 — HIDE PLAYERS                          ║
+    ║   + Скрытие чужих игроков дальше 50 стад                 ║
+    ║   + Включено в пресете «Низкая»                          ║
+    ║   + Пресеты: Низкая / Средняя / Высокая                  ║
+    ║   + FOV: полный экран телефона                           ║
+    ║   + Безопасный куллинг (не проваливаешься)               ║
     ║   + НЕ трогает UI игры / Delta / Roblox                  ║
     ╚══════════════════════════════════════════════════════════╝
 --]]
@@ -19,7 +20,7 @@ local LocalPlayer = Players.LocalPlayer
 -- ==================== НАСТРОЙКИ ====================
 local SETTINGS = {
     -- Камера
-    FOV = 90,                    -- 70..120 (больше = шире обзор)
+    FOV = 90,
     CameraZoomMax = 500,
     CameraZoomMin = 0.1,
     ExtendCameraPitch = true,
@@ -30,6 +31,10 @@ local SETTINGS = {
     CullRange = 300,
     CheckInterval = 0.20,
     RefreshInterval = 3.0,
+
+    -- ★ Скрытие чужих игроков
+    HideOtherPlayers = true,
+    PlayerHideDistance = 50,       -- в стадах
 
     -- Эффекты
     RemoveParticles = true,
@@ -47,7 +52,7 @@ local SETTINGS = {
     RemoveDepthOfField = true,
     TerrainLowQuality = true,
     KillSounds = false,
-    KillReflections = true,      -- reflectance = 0 у всех частей
+    KillReflections = true,
 }
 
 -- ==================== FPS СЧЁТЧИК ====================
@@ -73,28 +78,23 @@ local function measureFPS(duration)
     return math.floor(frames / (tick() - startT) + 0.5)
 end
 
--- ==================== КАМЕРА (FOV + ЗУМ) ====================
+-- ==================== КАМЕРА ====================
 local cameraBoosted = false
 local origZoomMax, origZoomMin, origFOV
 
 local function applyCamera()
     cameraBoosted = true
-
     pcall(function()
         origZoomMax = LocalPlayer.CameraMaxZoomDistance
         origZoomMin = LocalPlayer.CameraMinZoomDistance
         LocalPlayer.CameraMaxZoomDistance = SETTINGS.CameraZoomMax
         LocalPlayer.CameraMinZoomDistance = SETTINGS.CameraZoomMin
     end)
-
-    -- FOV для полного экрана
     local cam = Workspace.CurrentCamera
     if cam then
         origFOV = cam.FieldOfView
         cam.FieldOfView = SETTINGS.FOV
     end
-
-    -- Расширение наклона вверх/вниз
     if SETTINGS.ExtendCameraPitch then
         task.spawn(function()
             local ok, PlayerModule = pcall(function()
@@ -130,7 +130,88 @@ end
 
 applyCamera()
 
--- ==================== КУЛЛИНГ (БЕЗОПАСНЫЙ) ====================
+-- ==================== ★ СКРЫТИЕ ЧУЖИХ ИГРОКОВ ====================
+local hiddenPlayers = {}       -- [player] = { parts = {part, ...} }
+local playerHideConn = nil
+
+local function hidePlayerParts(plr)
+    if not plr or plr == LocalPlayer then return end
+    if hiddenPlayers[plr] then return end
+
+    local char = plr.Character
+    if not char then return end
+
+    local parts = {}
+    for _, obj in ipairs(char:GetDescendants()) do
+        if obj:IsA("BasePart") or obj:IsA("Decal") or obj:IsA("ParticleEmitter") or obj:IsA("Trail") then
+            table.insert(parts, { obj = obj, transparency = obj.Transparency, enabled = obj.Enabled })
+            pcall(function() obj.Transparency = 1 end)
+            if obj:IsA("ParticleEmitter") or obj:IsA("Trail") then
+                pcall(function() obj.Enabled = false end)
+            end
+        end
+    end
+    hiddenPlayers[plr] = parts
+end
+
+local function showPlayerParts(plr)
+    if not hiddenPlayers[plr] then return end
+    for _, data in ipairs(hiddenPlayers[plr]) do
+        pcall(function()
+            if data.obj then
+                data.obj.Transparency = data.transparency or 0
+                if data.obj:IsA("ParticleEmitter") or data.obj:IsA("Trail") then
+                    data.obj.Enabled = data.enabled ~= false
+                end
+            end
+        end)
+    end
+    hiddenPlayers[plr] = nil
+end
+
+local function showAllPlayers()
+    for plr in pairs(hiddenPlayers) do
+        showPlayerParts(plr)
+    end
+end
+
+-- Слежение за игроками
+local function hookPlayers()
+    if playerHideConn then playerHideConn:Disconnect(); playerHideConn = nil end
+
+    playerHideConn = RunService.Heartbeat:Connect(function()
+        if not SETTINGS.HideOtherPlayers then
+            if next(hiddenPlayers) then showAllPlayers() end
+            return
+        end
+
+        local myChar = LocalPlayer.Character
+        local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+        if not myRoot then return end
+        local myPos = myRoot.Position
+
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                local char = plr.Character
+                local root = char and char:FindFirstChild("HumanoidRootPart")
+                if root then
+                    local dist = (root.Position - myPos).Magnitude
+                    if dist > SETTINGS.PlayerHideDistance then
+                        hidePlayerParts(plr)
+                    else
+                        showPlayerParts(plr)
+                    end
+                else
+                    if hiddenPlayers[plr] then showPlayerParts(plr) end
+                end
+            end
+        end
+    end)
+end
+
+hookPlayers()
+
+-- ==================== КУЛЛИНГ ====================
 local culled = {}
 local allParts = {}
 local lastRefresh = 0
@@ -253,12 +334,10 @@ local function optimizeLighting()
     Lighting.Brightness = 2
     Lighting.Ambient = Color3.fromRGB(120, 120, 120)
     Lighting.OutdoorAmbient = Color3.fromRGB(120, 120, 120)
-
     if SETTINGS.RemoveFog then
         Lighting.FogEnd = 100000
         Lighting.FogStart = 100000
     end
-
     for _, e in ipairs(Lighting:GetChildren()) do
         local cn = e.ClassName
         if SETTINGS.RemoveSky and cn == "Sky" then safeRemove(e)
@@ -293,11 +372,13 @@ local function setGraphicsLow()
     end
 end
 
--- ==================== ПРЕСЕТЫ ОПТИМИЗАЦИИ ====================
+-- ==================== ПРЕСЕТЫ ====================
 local PRESETS = {
     Low = {
         name = "Низкая",
         CameraCulling = false,
+        HideOtherPlayers = true,        -- ★ включено по умолчанию
+        PlayerHideDistance = 50,
         RemoveParticles = false,
         RemoveLights = false,
         RemoveShadows = false,
@@ -318,6 +399,8 @@ local PRESETS = {
     Medium = {
         name = "Средняя",
         CameraCulling = false,
+        HideOtherPlayers = true,
+        PlayerHideDistance = 100,
         RemoveParticles = true,
         RemoveLights = true,
         RemoveShadows = true,
@@ -338,6 +421,8 @@ local PRESETS = {
     High = {
         name = "Высокая",
         CameraCulling = true,
+        HideOtherPlayers = true,
+        PlayerHideDistance = 200,
         RemoveParticles = true,
         RemoveLights = true,
         RemoveShadows = true,
@@ -365,6 +450,7 @@ local function applyPreset(key)
     end
     setFOV(SETTINGS.FOV)
     if not SETTINGS.CameraCulling then restoreAll() end
+    if not SETTINGS.HideOtherPlayers then showAllPlayers() end
 end
 
 -- ==================== ЗАПУСК ====================
@@ -373,11 +459,9 @@ local function runOptimization(onStatus)
     status("📊 Замер FPS до...")
     task.wait(0.2)
     local fpsBefore = measureFPS(1.5)
-
     status("⚡ Оптимизация...")
     optimizeLighting(); optimizeTerrain(); hookAll(); setGraphicsLow()
     task.wait(0.3)
-
     status("📊 Замер FPS после...")
     task.wait(0.2)
     local fpsAfter = measureFPS(1.5)
@@ -428,7 +512,7 @@ panel.BackgroundColor3 = Color3.fromRGB(20, 28, 24)
 panel.BackgroundTransparency = 0.1
 panel.BorderSizePixel = 0
 panel.Visible = false
-panel.CanvasSize = UDim2.new(0, 0, 0, 860)
+panel.CanvasSize = UDim2.new(0, 0, 0, 940)
 panel.ScrollBarThickness = 3
 panel.ScrollBarImageColor3 = Color3.fromRGB(120, 255, 160)
 panel.Parent = screenGui
@@ -441,7 +525,7 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -16, 0, 26)
 title.Position = UDim2.new(0, 8, 0, 6)
 title.BackgroundTransparency = 1
-title.Text = "⚡ OPTIMIZER v5.0"
+title.Text = "⚡ OPTIMIZER v5.1"
 title.TextColor3 = Color3.fromRGB(180, 255, 200)
 title.Font = Enum.Font.GothamBold
 title.TextSize = 12
@@ -464,10 +548,10 @@ local statusLabel = Instance.new("TextLabel")
 statusLabel.Size = UDim2.new(1, -16, 0, 20)
 statusLabel.Position = UDim2.new(0, 8, 0, 62)
 statusLabel.BackgroundTransparency = 1
-statusLabel.Text = "🎥 Скрыто: 0   |   📷 FOV: 90°"
+statusLabel.Text = "🎥 Скрыто: 0  |  👥 Игроков: 0  |  📷 FOV: 90"
 statusLabel.TextColor3 = Color3.fromRGB(140, 200, 255)
 statusLabel.Font = Enum.Font.GothamBold
-statusLabel.TextSize = 11
+statusLabel.TextSize = 10
 statusLabel.TextXAlignment = Enum.TextXAlignment.Left
 statusLabel.Parent = panel
 
@@ -502,7 +586,9 @@ local function makePresetBtn(text, x, w, y, key, color)
     Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
     b.Activated:Connect(function()
         applyPreset(key)
-        resultLabel.Text = "✅ Пресет «" .. PRESETS[key].name .. "» применён!\nFOV: " .. SETTINGS.FOV .. "°"
+        resultLabel.Text = "✅ Пресет «" .. PRESETS[key].name .. "»\n" ..
+            "👥 Игроки скрыты с " .. SETTINGS.PlayerHideDistance .. " стад\n" ..
+            "📷 FOV: " .. SETTINGS.FOV .. "°"
     end)
     return b
 end
@@ -511,12 +597,12 @@ makePresetBtn("🟢 Низкая",  8,  90, 164, "Low",    Color3.fromRGB(35, 65
 makePresetBtn("🟡 Средняя", 105, 90, 164, "Medium", Color3.fromRGB(75, 65, 25))
 makePresetBtn("🔴 Высокая", 202, 90, 164, "High",   Color3.fromRGB(75, 35, 35))
 
--- ==================== FOV КНОПКИ ====================
+-- ==================== FOV ====================
 local fovLabel = Instance.new("TextLabel")
 fovLabel.Size = UDim2.new(1, -16, 0, 18)
 fovLabel.Position = UDim2.new(0, 8, 0, 202)
 fovLabel.BackgroundTransparency = 1
-fovLabel.Text = "📷 FOV (поле зрения) — полный экран"
+fovLabel.Text = "📷 FOV (поле зрения)"
 fovLabel.TextColor3 = Color3.fromRGB(180, 220, 255)
 fovLabel.Font = Enum.Font.GothamBold
 fovLabel.TextSize = 11
@@ -542,7 +628,38 @@ for i, v in ipairs(fovValues) do
     end)
 end
 
--- ==================== КНОПКИ-ПЕРЕКЛЮЧАТЕЛИ ====================
+-- ==================== ДИСТАНЦИЯ СКРЫТИЯ ИГРОКОВ ====================
+local distLabel = Instance.new("TextLabel")
+distLabel.Size = UDim2.new(1, -16, 0, 18)
+distLabel.Position = UDim2.new(0, 8, 0, 258)
+distLabel.BackgroundTransparency = 1
+distLabel.Text = "👥 Скрывать игроков дальше (стад)"
+distLabel.TextColor3 = Color3.fromRGB(255, 220, 160)
+distLabel.Font = Enum.Font.GothamBold
+distLabel.TextSize = 11
+distLabel.TextXAlignment = Enum.TextXAlignment.Left
+distLabel.Parent = panel
+
+local distValues = { 30, 50, 80, 100, 150, 200 }
+for i, v in ipairs(distValues) do
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(0, 45, 0, 26)
+    b.Position = UDim2.new(0, 8 + (i-1)*48, 0, 280)
+    b.BackgroundColor3 = Color3.fromRGB(60, 50, 30)
+    b.TextColor3 = Color3.fromRGB(255, 220, 160)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 11
+    b.Text = tostring(v)
+    b.AutoButtonColor = true
+    b.Parent = panel
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    b.Activated:Connect(function()
+        SETTINGS.PlayerHideDistance = v
+        resultLabel.Text = "👥 Игроки скрыты с " .. v .. " стад"
+    end)
+end
+
+-- ==================== ПЕРЕКЛЮЧАТЕЛИ ====================
 local function makeToggle(text, y, getter, setter)
     local b = Instance.new("TextButton")
     b.Size = UDim2.new(1, -16, 0, 26)
@@ -568,42 +685,44 @@ local function makeToggle(text, y, getter, setter)
     return b
 end
 
-makeToggle("🎥 Камера-куллинг", 258, function() return SETTINGS.CameraCulling end,
+makeToggle("👥 Скрытие игроков", 314, function() return SETTINGS.HideOtherPlayers end,
+    function(v) SETTINGS.HideOtherPlayers = v; if not v then showAllPlayers() end end)
+makeToggle("🎥 Камера-куллинг", 342, function() return SETTINGS.CameraCulling end,
     function(v) SETTINGS.CameraCulling = v; if not v then restoreAll() end end)
-makeToggle("📷 Расширение камеры", 286, function() return cameraBoosted end,
+makeToggle("📷 Расширение камеры", 370, function() return cameraBoosted end,
     function(v) if v then applyCamera() else restoreCamera() end end)
-makeToggle("🧹 Частицы", 314, function() return SETTINGS.RemoveParticles end,
+makeToggle("🧹 Частицы", 398, function() return SETTINGS.RemoveParticles end,
     function(v) SETTINGS.RemoveParticles = v end)
-makeToggle("💡 Свет", 342, function() return SETTINGS.RemoveLights end,
+makeToggle("💡 Свет", 426, function() return SETTINGS.RemoveLights end,
     function(v) SETTINGS.RemoveLights = v end)
-makeToggle("🌑 Тени", 370, function() return SETTINGS.RemoveShadows end,
+makeToggle("🌑 Тени", 454, function() return SETTINGS.RemoveShadows end,
     function(v) SETTINGS.RemoveShadows = v end)
-makeToggle("🎨 Наклейки / Текстуры", 398,
+makeToggle("🎨 Наклейки / Текстуры", 482,
     function() return SETTINGS.RemoveDecals and SETTINGS.RemoveTextures end,
     function(v) SETTINGS.RemoveDecals = v; SETTINGS.RemoveTextures = v end)
-makeToggle("🌫 Туман", 426, function() return SETTINGS.RemoveFog end,
+makeToggle("🌫 Туман", 510, function() return SETTINGS.RemoveFog end,
     function(v) SETTINGS.RemoveFog = v end)
-makeToggle("🌌 Небо / Атмосфера", 454,
+makeToggle("🌌 Небо / Атмосфера", 538,
     function() return SETTINGS.RemoveSky and SETTINGS.RemoveAtmosphere end,
     function(v) SETTINGS.RemoveSky = v; SETTINGS.RemoveAtmosphere = v end)
-makeToggle("🌸 Пост-эффекты", 482,
+makeToggle("🌸 Пост-эффекты", 566,
     function() return SETTINGS.RemoveBloom and SETTINGS.RemoveBlur end,
     function(v)
         SETTINGS.RemoveBloom = v; SETTINGS.RemoveBlur = v
         SETTINGS.RemoveSunRays = v; SETTINGS.RemoveColorCorrection = v
         SETTINGS.RemoveDepthOfField = v
     end)
-makeToggle("🌊 Террейн", 510, function() return SETTINGS.TerrainLowQuality end,
+makeToggle("🌊 Террейн", 594, function() return SETTINGS.TerrainLowQuality end,
     function(v) SETTINGS.TerrainLowQuality = v end)
-makeToggle("✨ Отражения", 538, function() return SETTINGS.KillReflections end,
+makeToggle("✨ Отражения", 622, function() return SETTINGS.KillReflections end,
     function(v) SETTINGS.KillReflections = v end)
-makeToggle("🔊 Глушить звуки", 566, function() return SETTINGS.KillSounds end,
+makeToggle("🔊 Глушить звуки", 650, function() return SETTINGS.KillSounds end,
     function(v) SETTINGS.KillSounds = v end)
 
 -- ==================== КНОПКИ ДЕЙСТВИЙ ====================
 local applyBtn = Instance.new("TextButton")
 applyBtn.Size = UDim2.new(1, -16, 0, 34)
-applyBtn.Position = UDim2.new(0, 8, 0, 604)
+applyBtn.Position = UDim2.new(0, 8, 0, 688)
 applyBtn.BackgroundColor3 = Color3.fromRGB(40, 70, 50)
 applyBtn.TextColor3 = Color3.fromRGB(180, 255, 200)
 applyBtn.Font = Enum.Font.GothamBold
@@ -615,19 +734,19 @@ Instance.new("UICorner", applyBtn).CornerRadius = UDim.new(0, 8)
 
 local restoreBtn = Instance.new("TextButton")
 restoreBtn.Size = UDim2.new(1, -16, 0, 26)
-restoreBtn.Position = UDim2.new(0, 8, 0, 644)
+restoreBtn.Position = UDim2.new(0, 8, 0, 728)
 restoreBtn.BackgroundColor3 = Color3.fromRGB(45, 55, 75)
 restoreBtn.TextColor3 = Color3.fromRGB(180, 220, 255)
 restoreBtn.Font = Enum.Font.GothamBold
 restoreBtn.TextSize = 11
-restoreBtn.Text = "🔙 Вернуть видимость"
+restoreBtn.Text = "🔙 Вернуть всех / видимость"
 restoreBtn.AutoButtonColor = true
 restoreBtn.Parent = panel
 Instance.new("UICorner", restoreBtn).CornerRadius = UDim.new(0, 8)
 
 local resetBtn = Instance.new("TextButton")
 resetBtn.Size = UDim2.new(1, -16, 0, 26)
-resetBtn.Position = UDim2.new(0, 8, 0, 676)
+resetBtn.Position = UDim2.new(0, 8, 0, 760)
 resetBtn.BackgroundColor3 = Color3.fromRGB(50, 35, 35)
 resetBtn.TextColor3 = Color3.fromRGB(255, 180, 180)
 resetBtn.Font = Enum.Font.GothamBold
@@ -653,7 +772,9 @@ task.spawn(function()
         if statusLabel and statusLabel.Parent then
             local n = 0
             for _ in pairs(culled) do n = n + 1 end
-            statusLabel.Text = string.format("🎥 Скрыто: %d   |   📷 FOV: %d°", n, SETTINGS.FOV)
+            local pn = 0
+            for _ in pairs(hiddenPlayers) do pn = pn + 1 end
+            statusLabel.Text = string.format("🎥 %d  |  👥 %d  |  📷 %d°", n, pn, SETTINGS.FOV)
         end
     end
 end)
@@ -681,7 +802,8 @@ end)
 
 restoreBtn.Activated:Connect(function()
     restoreAll()
-    resultLabel.Text = "🔙 Вся видимость восстановлена."
+    showAllPlayers()
+    resultLabel.Text = "🔙 Все игроки и части видны снова."
 end)
 
 resetBtn.Activated:Connect(function()
@@ -710,7 +832,7 @@ mainBtn.InputEnded:Connect(function() dragging = false end)
 
 return {
     Optimize = runOptimization,
-    RestoreAll = restoreAll,
+    RestoreAll = function() restoreAll(); showAllPlayers() end,
     ApplyPreset = applyPreset,
     SetFOV = setFOV,
     Presets = PRESETS,
